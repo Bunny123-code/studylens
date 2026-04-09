@@ -1,6 +1,6 @@
 import os
 from urllib.parse import urljoin
-from utils_scraper import get_soup, extract_year, detect_subject, save_file
+from utils_scraper import get_soup, extract_year, save_file
 
 BASE_DIR = "data/past_papers"
 
@@ -13,18 +13,22 @@ GRADES = {
 
 def run():
     for grade, url in GRADES.items():
+        print(f"\n[MULTAN] {grade}")
+
         soup = get_soup(url)
+        if not soup:
+            continue  # ← prevents crash
 
         for a in soup.find_all("a", href=True):
-            href = urljoin(url, a["href"])
+            link = urljoin(url, a["href"])
 
-            if ".pdf" not in href:
+            if ".pdf" not in link:
                 continue
 
-            subject = detect_subject(href)
-            year = extract_year(href)
+            year = extract_year(link)
+            subject = a.text.strip() or "Unknown"
 
-            if not subject or not year:
+            if not year:
                 continue
 
             path = os.path.join(
@@ -32,7 +36,7 @@ def run():
             )
 
             if not os.path.exists(path):
-                save_file(href, path)
+                save_file(link, path)
 
 if __name__ == "__main__":
     run()

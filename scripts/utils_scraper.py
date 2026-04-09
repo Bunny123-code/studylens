@@ -55,4 +55,8 @@ def save_file(url, path):
             print(f"[SAVED] {path}")
 
     except Exception as e:
+<<<<<<< HEAD
         print(f"[DOWNLOAD ERROR] {url}")
+=======
+        print(f"[DOWNLOAD ERROR] {url}")
+>>>>>>> 02ae37642c2d208e84ff6b4b795698e764da7d66
