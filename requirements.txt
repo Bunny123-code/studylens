@@ -41,3 +41,8 @@ pydantic-core==2.20.1
 sniffio==1.3.1
 tqdm==4.66.5
 typing_extensions>=4.12.2
+
+#scraper requirements
+requests
+beautifulsoup4
+tqdm
