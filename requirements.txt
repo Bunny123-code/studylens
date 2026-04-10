@@ -46,3 +46,11 @@ typing_extensions>=4.12.2
 requests
 beautifulsoup4
 tqdm
+
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+pdfplumber>=0.10.0
+pytesseract>=0.3.10
+Pillow>=10.0.0
+pdf2image>=1.16.0
