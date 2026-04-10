@@ -1,56 +1,32 @@
 # ─────────────────────────────────────────────────────────────
-# StudyLens — Notes Generator  |  requirements.txt
-#
-# Install:  pip install -r requirements.txt
+# StudyLens — requirements.txt
+# Install: pip install -r requirements.txt
 #
 # System packages also required:
-#   sudo apt-get install -y tesseract-ocr poppler-utils
+#   sudo apt-get install -y tesseract-ocr tesseract-ocr-urd poppler-utils
 # ─────────────────────────────────────────────────────────────
 
-# Web framework
+# Web framework (for notes generator)
 flask==3.0.3
 python-dotenv==1.0.1
 werkzeug==3.0.3
 
-# OpenAI SDK (for AI notes — optional, fallback works without it)
+# OpenAI SDK (optional – notes generator)
 openai==1.51.0
+httpx==0.27.2          # required by openai, pinned for compatibility
 
-# httpx pinned: openai 1.x passes `proxies` to httpx;
-# httpx >= 0.28 removed that kwarg → startup crash.
-httpx==0.27.2
-
-# PDF text extraction (primary — fast, no Tesseract needed for digital PDFs)
+# PDF text extraction (primary)
 pdfplumber==0.11.4
 
-# OCR fallback (for scanned PDFs)
+# OCR fallback (for scanned PDFs / images)
 pytesseract==0.3.13
 Pillow==10.4.0
-pdf2image==1.17.0       # converts PDF pages to images for Tesseract
+pdf2image==1.17.0
 
-# Transitive dependency pins for reproducibility
-anyio==4.4.0
-certifi>=2024.2.2
-charset-normalizer>=3.3.2
-distro==1.9.0
-h11==0.14.0
-httpcore==1.0.5
-idna>=3.7
-jiter==0.5.0
-pydantic==2.8.2
-pydantic-core==2.20.1
-sniffio==1.3.1
+# Web scraping
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# Progress bars (nice to have during scraping)
 tqdm==4.66.5
-typing_extensions>=4.12.2
-
-#scraper requirements
-requests
-beautifulsoup4
-tqdm
-
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
-pdfplumber>=0.10.0
-pytesseract>=0.3.10
-Pillow>=10.0.0
-pdf2image>=1.16.0
