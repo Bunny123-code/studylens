@@ -3,6 +3,7 @@ import json
 from flask import Flask, send_from_directory, request, jsonify, render_template
 from flask_cors import CORS
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -12,13 +13,24 @@ from backend.routes.notes import notes_bp
 from backend.routes.predict import predict_bp
 from backend.routes.metadata import metadata_bp
 
-# ========== NEW IMPORTS FOR AUTH & PAYMENT ==========
+# ========== IMPORTS FOR AUTH & PAYMENT ==========
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, login_required, current_user
 from backend.models import db, User
 from backend.auth import auth_bp, create_admin_user
 from backend.routes.payment import payment_bp
 # ====================================================
+
+def is_premium_active(user):
+    """Check if user has an active premium subscription."""
+    if not user.is_premium:
+        return False
+    if user.subscription_expiry and user.subscription_expiry < datetime.utcnow():
+        # Subscription expired – automatically demote
+        user.is_premium = False
+        db.session.commit()
+        return False
+    return True
 
 def create_app():
     app = Flask(__name__,
@@ -79,26 +91,49 @@ def create_app():
     @app.route('/api/premium/generate-notes', methods=['POST'])
     @login_required
     def premium_generate_notes():
-        if not current_user.is_premium:
-            return jsonify({'error': 'Premium subscription required'}), 403
-        # Your existing notes generation logic here
-        from backend.utils.notes_generator import generate_notes
+        # Validate premium status with expiry check
+        if not is_premium_active(current_user):
+            return jsonify({'error': 'Active premium subscription required'}), 403
+
+        # Validate request data
         data = request.get_json()
-        text = data.get('text', '')
-        notes = generate_notes(text)
-        return jsonify({'notes': notes})
+        if not data:
+            return jsonify({'error': 'Missing JSON body'}), 400
+        text = data.get('text', '').strip()
+        if not text:
+            return jsonify({'error': 'No text provided'}), 400
+
+        try:
+            from backend.utils.notes_generator import generate_notes
+            notes = generate_notes(text)
+            return jsonify({'notes': notes})
+        except ImportError as e:
+            return jsonify({'error': 'Notes generator not available'}), 500
+        except Exception as e:
+            return jsonify({'error': f'Failed to generate notes: {str(e)}'}), 500
 
     @app.route('/api/premium/predict-questions', methods=['POST'])
     @login_required
     def premium_predict():
-        if not current_user.is_premium:
-            return jsonify({'error': 'Premium subscription required'}), 403
-        from backend.utils.prediction_engine import predict_questions
+        if not is_premium_active(current_user):
+            return jsonify({'error': 'Active premium subscription required'}), 403
+
         data = request.get_json()
-        subject = data.get('subject')
-        grade = data.get('grade')
-        predictions = predict_questions(subject, grade)
-        return jsonify({'predictions': predictions})
+        if not data:
+            return jsonify({'error': 'Missing JSON body'}), 400
+        subject = data.get('subject', '').strip()
+        grade = data.get('grade', '').strip()
+        if not subject or not grade:
+            return jsonify({'error': 'Subject and grade are required'}), 400
+
+        try:
+            from backend.utils.prediction_engine import predict_questions
+            predictions = predict_questions(subject, grade)
+            return jsonify({'predictions': predictions})
+        except ImportError as e:
+            return jsonify({'error': 'Prediction engine not available'}), 500
+        except Exception as e:
+            return jsonify({'error': f'Failed to predict questions: {str(e)}'}), 500
     # ==============================================
 
     # Create tables and admin user on first run
