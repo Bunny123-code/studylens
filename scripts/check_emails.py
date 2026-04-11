@@ -44,17 +44,14 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 def extract_payment_info(email_body, account_number):
-    # Extract amount (e.g., "PKR 500" or "Rs. 500")
     amount_match = re.search(r'(?:PKR|Rs\.?)\s*([\d,]+\.?\d*)', email_body, re.IGNORECASE)
     amount = None
     if amount_match:
         amount = float(amount_match.group(1).replace(',', ''))
 
-    # Extract reference code (e.g., "Reference: SL-ABC123")
     ref_match = re.search(r'Reference:\s*([A-Z0-9\-]+)', email_body, re.IGNORECASE)
     reference = ref_match.group(1) if ref_match else None
 
-    # Optional: verify account number appears in email
     if account_number and account_number not in email_body.replace('-', '').replace(' ', ''):
         return None, None
 
@@ -66,8 +63,12 @@ def process_emails():
         service = get_gmail_service()
         account_number = os.getenv('ACCOUNT_NUMBER', '').replace('-', '').replace(' ', '')
 
-        # Query unread emails from Meezan Bank alerts (adjust sender if needed)
-        query = f'from:alerts@meezanbank.com is:unread after:{int((datetime.now() - timedelta(minutes=10)).timestamp())}'
+        # Get sender email from environment, fallback to default Meezan alert address
+        sender_email = os.getenv('BANK_ALERT_SENDER', 'alerts@meezanbank.com')
+
+        # Query unread emails from the configured sender within last 10 minutes
+        after_timestamp = int((datetime.now() - timedelta(minutes=10)).timestamp())
+        query = f'from:{sender_email} is:unread after:{after_timestamp}'
         results = service.users().messages().list(userId='me', q=query).execute()
         messages = results.get('messages', [])
 
@@ -105,9 +106,14 @@ def process_emails():
             service.users().messages().modify(userId='me', id=msg['id'], body={'removeLabelIds': ['UNREAD']}).execute()
 
 if __name__ == '__main__':
+    # Ensure credentials.json exists
+    if not os.path.exists('credentials.json'):
+        print("ERROR: credentials.json not found. Please place your Google OAuth credentials file in the project root.")
+        sys.exit(1)
+
     while True:
         try:
             process_emails()
         except Exception as e:
             print(f"Error: {e}")
-        time.sleep(120)  # Check every 2 minutes
+        time.sleep(120)
