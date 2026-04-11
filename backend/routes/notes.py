@@ -1,34 +1,27 @@
-import os
-import json
 from flask import Blueprint, request, jsonify
-from backend.utils.notes_generator import generate_notes_from_text
-from backend.utils.data_loader import load_all_texts
+from flask_login import login_required, current_user
+from backend.utils.data_loader import load_paper_text
+from backend.utils.notes_generator import generate_notes
 
 notes_bp = Blueprint('notes', __name__)
 
 @notes_bp.route('/generate', methods=['POST'])
-def generate_notes():
+@login_required
+def generate():
     data = request.get_json()
-    text = data.get('text', '')
-    if not text:
-        return jsonify({'error': 'No text provided'}), 400
-    try:
-        notes = generate_notes_from_text(text)
-        return jsonify({'notes': notes})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@notes_bp.route('/from-papers', methods=['POST'])
-def from_papers():
-    data = request.get_json()
+    board = data.get('board')
     grade = data.get('grade')
     subject = data.get('subject')
-    if not grade or not subject:
-        return jsonify({'error': 'Grade and subject required'}), 400
+    year = data.get('year')
+
+    if not all([board, grade, subject, year]):
+        return jsonify({'error': 'Missing required parameters'}), 400
+
     try:
-        texts = load_all_texts(grade=grade, subject=subject)
-        combined_text = '\n'.join(texts)
-        notes = generate_notes_from_text(combined_text)
+        text = load_paper_text(board, grade, subject, year)
+        notes = generate_notes(text, subject, grade, board)
         return jsonify({'notes': notes})
+    except FileNotFoundError as e:
+        return jsonify({'error': str(e)}), 404
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Failed to generate notes: {str(e)}'}), 500
