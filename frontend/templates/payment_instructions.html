@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container">
+    <h3>Complete Your Payment</h3>
+    <div class="alert">
+        <p>Please transfer exactly <strong>Rs. {{ amount }}</strong> to:</p>
+        <ul>
+            <li>Bank: {{ bank_name }}</li>
+            <li>Account Title: {{ account_name }}</li>
+            <li>Account Number: {{ account_number }}</li>
+            <li>IBAN: {{ iban }}</li>
+            <li><strong>Reference Code:</strong> <span style="background: yellow; padding: 4px;">{{ reference }}</span></li>
+        </ul>
+        <p>After transfer, this page will auto-refresh once payment is confirmed (usually within 5 mins).</p>
+    </div>
+    <div id="status">Waiting for payment...</div>
+</div>
+
+<script>
+function checkStatus() {
+    fetch('/payment/status')
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'completed') {
+                window.location.href = '/';
+            } else {
+                document.getElementById('status').innerText = 'Payment not yet received. Checking again...';
+                setTimeout(checkStatus, 10000);
+            }
+        });
+}
+checkStatus();
+</script>
+{% endblock %}
