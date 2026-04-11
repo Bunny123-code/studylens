@@ -1,12 +1,32 @@
 import os
-import json
+import sys
 from flask import Flask, send_from_directory, request, jsonify, render_template
 from flask_cors import CORS
+from flask_talisman import Talisman
 from dotenv import load_dotenv
 from datetime import datetime
 
 # Load environment variables
 load_dotenv()
+
+# Required environment variables for production
+REQUIRED_ENV_VARS = [
+    'SECRET_KEY',
+    'ADMIN_PASSWORD',
+    'BANK_NAME',
+    'ACCOUNT_NAME',
+    'ACCOUNT_NUMBER',
+    'IBAN',
+    'PRICE_PKR',
+    'BANK_ALERT_SENDER'
+]
+
+def validate_env_vars():
+    missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+    if missing:
+        print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
+        print("Please set them in your .env file.")
+        sys.exit(1)
 
 # Import custom modules
 from backend.routes.notes import notes_bp
@@ -33,13 +53,25 @@ def is_premium_active(user):
     return True
 
 def create_app():
+    validate_env_vars()
+
     app = Flask(__name__,
                 static_folder='../frontend/static',
                 template_folder='../frontend/templates')
 
     # Configuration
-    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key')
+    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
     app.config['DEBUG'] = os.getenv('DEBUG', 'false').lower() == 'true'
+
+    # Security Headers (only enforce in production)
+    if not app.config['DEBUG']:
+        Talisman(app, content_security_policy={
+            'default-src': "'self'",
+            'script-src': ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+            'style-src': ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+            'font-src': ["'self'", "https://fonts.gstatic.com"],
+            'img-src': ["'self'", "data:"],
+        }, force_https=True)
 
     # ========== DATABASE CONFIGURATION ==========
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(os.path.dirname(__file__), 'app.db')
