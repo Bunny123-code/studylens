@@ -1,0 +1,18 @@
+{% extends "base.html" %}  <!-- Adjust if you have a base template -->
+{% block content %}
+<div class="container">
+    <h2>Unlock Premium Access</h2>
+    <p>Get access to generated notes, predictions, and important questions.</p>
+    <div class="pricing">
+        <div class="card">
+            <h3>Monthly</h3>
+            <p>Rs. {{ price }} / month</p>
+            <form action="{{ url_for('payment.create_request') }}" method="POST">
+                <input type="hidden" name="plan" value="monthly">
+                <button type="submit" class="btn">Subscribe Monthly</button>
+            </form>
+        </div>
+        <!-- You can add yearly plan similarly -->
+    </div>
+</div>
+{% endblock %}
