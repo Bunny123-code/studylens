@@ -1,6 +1,6 @@
 /**
  * static/script.js — StudyLens Notes Generator
- * Handles: cascading dropdowns, API calls, and results rendering.
+ * Handles: cascading dropdowns, API calls, results rendering, and feedback.
  */
 "use strict";
 
@@ -48,8 +48,8 @@ async function populateGrades() {
 }
 
 async function populateBoards(grade) {
-  boardSelect.innerHTML  = '<option value="">Loading…</option>';
-  boardSelect.disabled   = true;
+  boardSelect.innerHTML   = '<option value="">Loading…</option>';
+  boardSelect.disabled    = true;
   subjectSelect.innerHTML = '<option value="">Select board first</option>';
   subjectSelect.disabled  = true;
   setButtonsEnabled(false);
@@ -131,13 +131,121 @@ function hideLoading() {
 function resetView() {
   notesSection.hidden = true;
   predSection.hidden  = true;
+  hideFeedback();
   document.getElementById("selector").hidden = false;
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function esc(str) {
   return String(str || "")
-    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/* ── Feedback (Task 7) ───────────────────────────────────────────────────────
+ * Shows 👍 / 👎 buttons after notes or predictions are rendered.
+ * Sends POST /submit-feedback with { feedback: "yes" | "no" }.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Build and inject the feedback bar into the given parent element.
+ * @param {HTMLElement} parentEl - element to append the bar into
+ */
+function injectFeedbackBar(parentEl) {
+  // Remove any previously injected bar to avoid duplicates
+  hideFeedback();
+
+  const bar = document.createElement("div");
+  bar.id = "feedback-bar";
+  bar.style.cssText = [
+    "display:flex",
+    "align-items:center",
+    "gap:12px",
+    "padding:14px 18px",
+    "background:var(--surface)",
+    "border:1px solid var(--border)",
+    "border-radius:var(--r-sm)",
+    "margin-top:4px",
+  ].join(";");
+
+  bar.innerHTML = `
+    <span style="font-size:13px;color:var(--subtle);flex:1;">
+      Were these notes helpful?
+    </span>
+    <button
+      id="feedback-yes"
+      style="
+        background:var(--surface-2);border:1px solid var(--border);
+        color:var(--text);padding:7px 16px;border-radius:var(--r-sm);
+        font-family:var(--font);font-size:13px;cursor:pointer;
+        transition:border-color 0.18s ease,color 0.18s ease;
+      "
+      title="Helpful"
+    >👍 Helpful</button>
+    <button
+      id="feedback-no"
+      style="
+        background:var(--surface-2);border:1px solid var(--border);
+        color:var(--text);padding:7px 16px;border-radius:var(--r-sm);
+        font-family:var(--font);font-size:13px;cursor:pointer;
+        transition:border-color 0.18s ease,color 0.18s ease;
+      "
+      title="Not helpful"
+    >👎 Not Helpful</button>
+    <span id="feedback-thanks" style="font-size:13px;color:var(--green);display:none;">
+      ✓ Thanks for your feedback!
+    </span>
+  `;
+
+  parentEl.appendChild(bar);
+
+  // Wire up click handlers
+  document.getElementById("feedback-yes").addEventListener("click", () => submitFeedback("yes"));
+  document.getElementById("feedback-no").addEventListener("click",  () => submitFeedback("no"));
+}
+
+/** Remove the feedback bar if it exists. */
+function hideFeedback() {
+  const bar = document.getElementById("feedback-bar");
+  if (bar) bar.remove();
+}
+
+/**
+ * Send feedback to the server.
+ * @param {"yes"|"no"} value
+ */
+async function submitFeedback(value) {
+  const yesBtn    = document.getElementById("feedback-yes");
+  const noBtn     = document.getElementById("feedback-no");
+  const thanksMsg = document.getElementById("feedback-thanks");
+
+  // Disable buttons immediately to prevent double-submit
+  if (yesBtn) yesBtn.disabled = true;
+  if (noBtn)  noBtn.disabled  = true;
+
+  try {
+    const res = await fetch("/submit-feedback", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ feedback: value }),
+    });
+
+    if (res.ok) {
+      // Hide buttons, show thank-you message
+      if (yesBtn)    yesBtn.style.display    = "none";
+      if (noBtn)     noBtn.style.display     = "none";
+      if (thanksMsg) thanksMsg.style.display = "inline";
+    } else {
+      // Re-enable on failure so user can retry
+      if (yesBtn) yesBtn.disabled = false;
+      if (noBtn)  noBtn.disabled  = false;
+      console.warn("Feedback submission failed:", res.status);
+    }
+  } catch (err) {
+    // Network error — re-enable silently
+    if (yesBtn) yesBtn.disabled = false;
+    if (noBtn)  noBtn.disabled  = false;
+    console.warn("Feedback network error:", err);
+  }
 }
 
 /* ── Notes rendering ────────────────────────────────────────────────────────── */
@@ -162,7 +270,7 @@ function renderNotes(data) {
   topicsList.innerHTML = "";
   (n.key_topics || []).forEach(t => {
     const impBadge  = t.importance === "High" ? "badge-high" : "badge-medium";
-    const typeBadge = t.likely_question_type === "LONG" ? "badge-long"
+    const typeBadge = t.likely_question_type === "LONG"  ? "badge-long"
                     : t.likely_question_type === "SHORT" ? "badge-short"
                     : "badge-mcq";
     topicsList.innerHTML += `
@@ -201,6 +309,9 @@ function renderNotes(data) {
   hideLoading();
   notesSection.hidden = false;
   notesSection.scrollIntoView({ behavior: "smooth" });
+
+  // Task 7 — inject feedback bar at the bottom of the notes section
+  injectFeedbackBar(notesSection);
 }
 
 /* ── Predictions rendering ───────────────────────────────────────────────────── */
@@ -228,7 +339,7 @@ function renderPredictions(data) {
 
     const samplesHtml = p.sample_questions?.length
       ? `<div class="pred-samples">
-           ${p.sample_questions.map(s => `<p>• ${esc(s.slice(0,200))}</p>`).join("")}
+           ${p.sample_questions.map(s => `<p>• ${esc(s.slice(0, 200))}</p>`).join("")}
          </div>`
       : "";
 
@@ -246,6 +357,9 @@ function renderPredictions(data) {
   hideLoading();
   predSection.hidden = false;
   predSection.scrollIntoView({ behavior: "smooth" });
+
+  // Task 7 — inject feedback bar at the bottom of the predictions section
+  injectFeedbackBar(predSection);
 }
 
 /* ── Button handlers ─────────────────────────────────────────────────────────── */
@@ -267,7 +381,7 @@ generateBtn.addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
     renderNotes(data);
-  } catch(e) {
+  } catch (e) {
     hideLoading();
     document.getElementById("selector").hidden = false;
     showError("Error: " + e.message);
@@ -292,7 +406,7 @@ predictBtn.addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
     renderPredictions(data);
-  } catch(e) {
+  } catch (e) {
     hideLoading();
     document.getElementById("selector").hidden = false;
     showError("Error: " + e.message);
