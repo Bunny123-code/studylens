@@ -73,7 +73,7 @@ class Scraper:
     def _extract_links_fbise(self, start_url: str) -> list:
         """
         FBISE class page directly links to individual paper pages.
-        Pattern: /class-9-biology-fbise-past-paper-2025/
+        Patterns: /class-*-past-paper-*, /class-*-fbise-past-paper-*, etc.
         """
         soup = self._get_soup(start_url)
         if not soup:
@@ -83,24 +83,24 @@ class Scraper:
         file_urls = []
         paper_page_links = []
 
-        # Find all links inside entry-content that look like paper pages
+        # Look inside entry-content div first
         content_div = soup.find("div", class_="entry-content")
-        if content_div:
-            for a in content_div.find_all("a", href=True):
-                href = a["href"]
-                # Matches URLs like /class-9-biology-fbise-past-paper-2025/
-                if re.search(r'/class-\d+-[a-z]+-fbise-past-paper-\d{4}', href, re.IGNORECASE):
-                    full_url = urljoin(start_url, href)
-                    paper_page_links.append(full_url)
-        else:
-            # Fallback: search whole page
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if re.search(r'/class-\d+-[a-z]+-fbise-past-paper-\d{4}', href, re.IGNORECASE):
-                    full_url = urljoin(start_url, href)
-                    paper_page_links.append(full_url)
+        search_area = content_div if content_div else soup
 
-        # Also include links from fbisesolvedpastpapers.com (older papers)
+        for a in search_area.find_all("a", href=True):
+            href = a["href"]
+            # Broader match: any link containing "past-paper"
+            if "past-paper" in href:
+                # Exclude navigation links back to class pages
+                if not href.endswith("/class-9-fbise-past-papers/") and \
+                   not href.endswith("/class-10-fbise-past-papers/") and \
+                   not href.endswith("/class-11-fbise-past-papers/") and \
+                   not href.endswith("/class-12-fbise-past-papers/"):
+                    full_url = urljoin(start_url, href)
+                    paper_page_links.append(full_url)
+                    logger.debug(f"Found paper link: {full_url}")
+
+        # Also include links from fbisesolvedpastpapers.com
         for a in soup.find_all("a", href=True):
             href = a["href"]
             if "fbisesolvedpastpapers.com" in href and "past-paper" in href:
@@ -111,6 +111,11 @@ class Scraper:
         paper_page_links = list(dict.fromkeys(paper_page_links))
         logger.info(f"Found {len(paper_page_links)} paper page links on {start_url}")
 
+        # If zero links found, fall back to generic BFS crawler
+        if len(paper_page_links) == 0:
+            logger.warning("No paper links found with custom parser; falling back to generic BFS crawler.")
+            return self._extract_links_generic(start_url, urlparse(start_url).netloc)
+
         # Visit each paper page and extract PDF link
         for paper_url in paper_page_links:
             logger.debug(f"Visiting paper page: {paper_url}")
@@ -118,7 +123,6 @@ class Scraper:
             if not paper_soup:
                 continue
 
-            # Look for direct .pdf link
             pdf_found = False
             for a in paper_soup.find_all("a", href=True):
                 href = a["href"]
@@ -126,9 +130,9 @@ class Scraper:
                     pdf_url = urljoin(paper_url, href)
                     file_urls.append(pdf_url)
                     pdf_found = True
+                    logger.debug(f"Found PDF: {pdf_url}")
                     break
 
-            # If no direct PDF, look for a download button/link
             if not pdf_found:
                 download_btn = paper_soup.find("a", string=re.compile(r'download|click here', re.I))
                 if download_btn and download_btn.get("href"):
@@ -157,7 +161,6 @@ class Scraper:
                     pdf_url = urljoin(start_url, href)
                     file_urls.append(pdf_url)
 
-        # Fallback: any PDF/ZIP on page
         if not file_urls:
             for a in soup.find_all("a", href=True):
                 href = a["href"]
