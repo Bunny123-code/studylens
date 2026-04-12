@@ -78,71 +78,76 @@ class Scraper:
             return True
         return False
 
-    def _extract_links_fbise(self, start_url: str) -> list:
-        """
-        Crawl FBISE site: class page -> subject pages -> PDF links.
-        Improved to use more robust selectors and handle New/Old syllabus.
-        """
-        soup = self._get_soup(start_url)
-        if not soup:
-            logger.error(f"Could not fetch FBISE class page: {start_url}")
-            return []
+   def _extract_links_fbise(self, start_url: str) -> list:
+    """
+    FBISE class page directly lists links to individual paper pages.
+    Pattern: /class-9-biology-fbise-past-paper-2025/
+    """
+    soup = self._get_soup(start_url)
+    if not soup:
+        logger.error(f"Could not fetch FBISE class page: {start_url}")
+        return []
 
-        file_urls = []
-        subject_links = []
+    file_urls = []
+    paper_page_links = []
 
-        # Find all subject links on the class page.
-        # They are typically inside <div class="entry-content"> and have "fbise-past-papers" in href.
-        content_div = soup.find("div", class_="entry-content")
-        if content_div:
-            for a in content_div.find_all("a", href=True):
-                href = a["href"]
-                if "fbise-past-papers" in href and "/class-" in href:
-                    full_url = urljoin(start_url, href)
-                    subject_links.append(full_url)
-        else:
-            # Fallback: search whole page
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if "fbise-past-papers" in href and "/class-" in href:
-                    full_url = urljoin(start_url, href)
-                    subject_links.append(full_url)
+    # Find all links inside entry-content that look like paper pages
+    content_div = soup.find("div", class_="entry-content")
+    if content_div:
+        for a in content_div.find_all("a", href=True):
+            href = a["href"]
+            # Matches URLs like /class-9-biology-fbise-past-paper-2025/
+            if re.search(r'/class-\d+-[a-z]+-fbise-past-paper-\d{4}', href, re.IGNORECASE):
+                full_url = urljoin(start_url, href)
+                paper_page_links.append(full_url)
+    else:
+        # Fallback: search whole page
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if re.search(r'/class-\d+-[a-z]+-fbise-past-paper-\d{4}', href, re.IGNORECASE):
+                full_url = urljoin(start_url, href)
+                paper_page_links.append(full_url)
 
-        # Remove duplicates while preserving order
-        subject_links = list(dict.fromkeys(subject_links))
-        logger.info(f"Found {len(subject_links)} subject links on {start_url}")
+    # Also check links from fbisesolvedpastpapers.com domain (older papers)
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "fbisesolvedpastpapers.com" in href and "past-paper" in href:
+            full_url = urljoin(start_url, href)
+            paper_page_links.append(full_url)
 
-        # Visit each subject page and extract PDF links
-        for subj_url in subject_links:
-            logger.debug(f"Visiting subject page: {subj_url}")
-            sub_soup = self._get_soup(subj_url)
-            if not sub_soup:
-                continue
+    # Remove duplicates
+    paper_page_links = list(dict.fromkeys(paper_page_links))
+    logger.info(f"Found {len(paper_page_links)} paper page links on {start_url}")
 
-            # Find all PDF links on the subject page.
-            # Sometimes PDFs are inside <a> tags, sometimes in <div class="wp-block-file">.
-            pdf_links = []
-            # Direct <a> tags with .pdf
-            for a in sub_soup.find_all("a", href=True):
-                href = a["href"]
+    # Visit each paper page and extract PDF link
+    for paper_url in paper_page_links:
+        logger.debug(f"Visiting paper page: {paper_url}")
+        paper_soup = self._get_soup(paper_url)
+        if not paper_soup:
+            continue
+
+        # Find PDF link – usually a direct .pdf link or inside a download button
+        pdf_found = False
+        for a in paper_soup.find_all("a", href=True):
+            href = a["href"]
+            if href.lower().endswith(".pdf"):
+                pdf_url = urljoin(paper_url, href)
+                file_urls.append(pdf_url)
+                pdf_found = True
+                break
+        # If no direct PDF, look for a download button that redirects
+        if not pdf_found:
+            download_btn = paper_soup.find("a", string=re.compile(r'download|click here', re.I))
+            if download_btn and download_btn.get("href"):
+                href = download_btn["href"]
                 if href.lower().endswith(".pdf"):
-                    pdf_links.append(href)
-            # Also check for links inside .wp-block-file (common in newer WordPress)
-            for file_block in sub_soup.select(".wp-block-file a"):
-                href = file_block.get("href")
-                if href and href.lower().endswith(".pdf"):
-                    pdf_links.append(href)
+                    pdf_url = urljoin(paper_url, href)
+                    file_urls.append(pdf_url)
 
-            # Convert to absolute URLs and add to master list
-            for pdf_link in pdf_links:
-                full_pdf_url = urljoin(subj_url, pdf_link)
-                file_urls.append(full_pdf_url)
+        time.sleep(random.uniform(0.5, 1.0))
 
-            # Polite delay between subject pages
-            time.sleep(random.uniform(1.0, 2.0))
-
-        logger.info(f"Total PDF links found from FBISE: {len(file_urls)}")
-        return list(set(file_urls))
+    logger.info(f"Total PDF links found from FBISE: {len(file_urls)}")
+    return list(set(file_urls))
 
     def _extract_links_multan(self, start_url: str) -> list:
         """
