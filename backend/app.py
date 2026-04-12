@@ -16,6 +16,7 @@ from utils.ai_processor import process_text
 from utils.rate_limiter import check_rate_limit, increment_usage, get_user_tier
 from utils.cache import get_cached_result, cache_result
 from utils.payment import save_payment_submission, get_all_submissions, approve_user, reject_user
+from utils.feedback import save_feedback, get_all_feedback  # Task 4 — feedback system
 
 # ── Load environment ─────────────────────────────────────────────────────────
 load_dotenv()
@@ -36,8 +37,11 @@ for folder in [UPLOAD_FOLDER, PAYMENT_FOLDER, DATA_FOLDER]:
 app.config["UPLOAD_FOLDER"]  = UPLOAD_FOLDER
 app.config["PAYMENT_FOLDER"] = PAYMENT_FOLDER
 
-ALLOWED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff"}
+ALLOWED_IMAGE_EXTENSIONS  = {"png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff"}
 ALLOWED_PAYMENT_EXTENSIONS = {"png", "jpg", "jpeg", "pdf"}
+
+# Task 3 — max images increased from 10 to 15
+MAX_IMAGES_PER_REQUEST = 15
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -96,10 +100,11 @@ def upload():
     # ── Rate limit check ─────────────────────────────────────────────────────
     allowed, remaining, limit = check_rate_limit(ip)
     if not allowed:
+        # Task 2 — friendly message, no upgrade pressure
         return jsonify({
             "error": (
-                f"You've reached your daily limit of {limit} requests. "
-                "Upgrade to Premium for 50 requests/day."
+                "You've reached today's free limit. "
+                "Please try again tomorrow."
             ),
             "rate_limited": True,
             "remaining": 0,
@@ -120,8 +125,17 @@ def upload():
             )
         }), 415
 
-    if len(valid_files) > 10:
-        return jsonify({"error": "Maximum 10 images per request."}), 400
+    # Task 3 — limit raised to MAX_IMAGES_PER_REQUEST (15)
+    if len(valid_files) > MAX_IMAGES_PER_REQUEST:
+        return jsonify({
+            "error": f"Maximum {MAX_IMAGES_PER_REQUEST} images per request."
+        }), 400
+
+    # Task 5 — log IP and image count at the start of processing
+    logger.info(
+        "Upload request — IP: %s | Images submitted: %d | Valid: %d",
+        ip, len(files), len(valid_files),
+    )
 
     # ── Save files temporarily ───────────────────────────────────────────────
     saved_paths = []
@@ -132,15 +146,15 @@ def upload():
             save_path = os.path.join(UPLOAD_FOLDER, unique_name)
             f.save(save_path)
             saved_paths.append(save_path)
-            logger.info("Saved: %s", save_path)
+            logger.info("Saved upload: %s", save_path)
     except Exception as exc:
-        logger.exception("Failed to save files.")
+        logger.exception("Failed to save uploaded files.")
         _cleanup(saved_paths)
         return jsonify({"error": f"Could not save uploaded files: {exc}"}), 500
 
     try:
         # ── OCR: extract text from each image ────────────────────────────────
-        all_texts = []
+        all_texts  = []
         ocr_errors = []
         for path in saved_paths:
             try:
@@ -152,27 +166,37 @@ def upload():
                 logger.warning("OCR failed for %s: %s", path, ve)
 
         if not all_texts:
+            # Task 8 — improved OCR error with actionable suggestions
             error_detail = " | ".join(ocr_errors) if ocr_errors else "No readable text found."
             return jsonify({
                 "error": (
                     "No readable text was found in the uploaded image(s). "
-                    "Please upload clearer images of textbook pages or question papers. "
-                    f"Details: {error_detail}"
+                    "Please try the following: "
+                    "(1) Use a clearer, higher-resolution image. "
+                    "(2) Make sure the page is well-lit and free of shadows. "
+                    "(3) Crop out unnecessary background — keep only the text area. "
+                    "(4) Avoid blurry or tilted shots. "
+                    f"Technical detail: {error_detail}"
                 )
             }), 422
 
         # ── Merge all OCR text ────────────────────────────────────────────────
         combined_text = "\n\n--- Page Break ---\n\n".join(all_texts)
-        logger.info("Total OCR characters: %d from %d image(s)", len(combined_text), len(all_texts))
+
+        # Task 5 — log total OCR characters extracted
+        logger.info(
+            "OCR complete — IP: %s | Images processed: %d | Total characters extracted: %d",
+            ip, len(all_texts), len(combined_text),
+        )
 
         # ── Cache check ───────────────────────────────────────────────────────
         cached = get_cached_result(combined_text)
         if cached:
-            logger.info("Cache hit — returning cached result.")
+            logger.info("Cache hit for IP %s — returning cached result.", ip)
             increment_usage(ip)
-            cached["cached"] = True
+            cached["cached"]    = True
             cached["remaining"] = remaining - 1
-            cached["limit"] = limit
+            cached["limit"]     = limit
             return jsonify(cached), 200
 
         # ── AI processing ─────────────────────────────────────────────────────
@@ -184,17 +208,17 @@ def upload():
         # ── Increment usage ───────────────────────────────────────────────────
         increment_usage(ip)
 
-        result["cached"] = False
+        result["cached"]    = False
         result["remaining"] = remaining - 1
-        result["limit"] = limit
+        result["limit"]     = limit
         return jsonify(result), 200
 
     except ValueError as ve:
-        logger.warning("ValueError: %s", ve)
+        logger.warning("ValueError during processing: %s", ve)
         return jsonify({"error": str(ve)}), 422
 
     except Exception as exc:
-        logger.exception("Unexpected error.")
+        logger.exception("Unexpected error during upload processing.")
         return jsonify({"error": f"An unexpected error occurred: {exc}"}), 500
 
     finally:
@@ -202,14 +226,76 @@ def upload():
 
 
 def _cleanup(paths: list[str]):
-    """Delete temporary files."""
+    """Delete temporary uploaded files."""
     for p in paths:
         try:
             if os.path.exists(p):
                 os.remove(p)
-                logger.info("Cleaned up: %s", p)
+                logger.info("Cleaned up temp file: %s", p)
         except Exception as e:
             logger.warning("Could not delete %s: %s", p, e)
+
+
+# ── Routes: Feedback (Task 4) ─────────────────────────────────────────────────
+
+@app.route("/submit-feedback", methods=["POST"])
+def submit_feedback():
+    """
+    Accept user feedback on AI results.
+
+    Request body (JSON):
+      { "feedback": "yes" | "no" }
+
+    Returns:
+      200 with success message, or 400 on invalid input.
+    """
+    ip   = get_client_ip()
+    data = request.get_json(silent=True)
+
+    if not data or "feedback" not in data:
+        return jsonify({"error": "Missing 'feedback' field. Send JSON with feedback: 'yes' or 'no'."}), 400
+
+    feedback_value = str(data.get("feedback", "")).strip().lower()
+
+    try:
+        entry = save_feedback(ip, feedback_value)
+        logger.info("Feedback received — IP: %s | value: %s | id: %s", ip, feedback_value, entry["id"])
+        return jsonify({
+            "success":   True,
+            "message":   "Thank you for your feedback.",
+            "id":        entry["id"],
+            "feedback":  entry["feedback"],
+            "timestamp": entry["timestamp"],
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as exc:
+        logger.exception("Failed to save feedback from IP %s.", ip)
+        return jsonify({"error": f"Could not save feedback: {exc}"}), 500
+
+
+@app.route("/admin/feedback")
+@admin_required
+def admin_feedback():
+    """
+    Return all feedback entries (admin only).
+
+    Returns:
+      JSON list of all feedback, most recent first.
+    """
+    try:
+        entries = get_all_feedback()
+        yes_count = sum(1 for e in entries if e.get("feedback") == "yes")
+        no_count  = sum(1 for e in entries if e.get("feedback") == "no")
+        return jsonify({
+            "total":    len(entries),
+            "helpful":  yes_count,
+            "not_helpful": no_count,
+            "entries":  entries,
+        }), 200
+    except Exception as exc:
+        logger.exception("Failed to retrieve feedback.")
+        return jsonify({"error": f"Could not retrieve feedback: {exc}"}), 500
 
 
 # ── Routes: Payment ───────────────────────────────────────────────────────────
@@ -250,8 +336,7 @@ def submit_payment():
     if not allowed_payment_file(screenshot.filename):
         return jsonify({"error": "Screenshot must be PNG, JPG, JPEG, or PDF."}), 415
 
-    # Save screenshot
-    ext = secure_filename(screenshot.filename).rsplit(".", 1)[1].lower()
+    ext      = secure_filename(screenshot.filename).rsplit(".", 1)[1].lower()
     filename = f"{uuid.uuid4().hex}.{ext}"
     save_path = os.path.join(PAYMENT_FOLDER, filename)
 
@@ -260,7 +345,6 @@ def submit_payment():
     except Exception as exc:
         return jsonify({"error": f"Could not save screenshot: {exc}"}), 500
 
-    # Store submission record
     whatsapp = request.form.get("whatsapp", "").strip()
     note     = request.form.get("note", "").strip()
 
@@ -326,17 +410,17 @@ def api_status():
     allowed, remaining, limit = check_rate_limit(ip)
     tier = get_user_tier(ip)
     return jsonify({
-        "ip": ip,
-        "tier": tier,
+        "ip":        ip,
+        "tier":      tier,
         "remaining": remaining,
-        "limit": limit,
-        "allowed": allowed,
+        "limit":     limit,
+        "allowed":   allowed,
     })
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     debug_mode = os.getenv("DEBUG", "false").lower() == "true"
-    port = int(os.getenv("PORT", "5000"))
+    port       = int(os.getenv("PORT", "5000"))
     logger.info("StudyLens starting on port %d (debug=%s)", port, debug_mode)
     app.run(host="0.0.0.0", port=port, debug=debug_mode)
