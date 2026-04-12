@@ -3,7 +3,8 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent))
 
-from scripts.scraper import Scraper
+from scraper import Scraper
+
 
 FBISE_SOURCES = {
     "fbise_class9": "https://fbisepastpapers.com/class-9-fbise-past-papers/",
