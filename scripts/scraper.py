@@ -22,7 +22,6 @@ class Scraper:
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     ]
 
-    # Keywords to avoid following (prevents recursion into notes, books, etc.)
     AVOID_KEYWORDS = [
         "guess", "note", "book", "syllabus", "date-sheet", "result",
         "roll-no", "practical", "fbise-books", "fbise-notes"
@@ -34,7 +33,6 @@ class Scraper:
         self.max_retries = max_retries
         self.max_depth = max_depth
         self.session = requests.Session()
-        # Rotate User-Agent
         self.session.headers.update({
             "User-Agent": random.choice(self.USER_AGENTS),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -48,7 +46,6 @@ class Scraper:
         """Fetch URL and return BeautifulSoup object with retries."""
         for attempt in range(self.max_retries):
             try:
-                # Random delay before request
                 time.sleep(random.uniform(1.0, 2.0))
                 resp = self.session.get(url, timeout=30)
                 resp.raise_for_status()
@@ -60,106 +57,98 @@ class Scraper:
         return None
 
     def _should_follow_link(self, url: str, base_domain: str) -> bool:
-        """Decide whether to follow a link for further crawling."""
         parsed = urlparse(url)
-        # Only follow links on same domain
         if parsed.netloc and parsed.netloc != base_domain:
             return False
-        # Avoid non-http schemes
         if parsed.scheme not in ("http", "https"):
             return False
-        # Avoid known non-paper sections
         url_lower = url.lower()
         for avoid in self.AVOID_KEYWORDS:
             if avoid in url_lower:
                 return False
-        # Must contain "past" or "paper" or a year pattern
         if "past" in url_lower or "paper" in url_lower or re.search(r'20[12]\d', url_lower):
             return True
         return False
 
-   def _extract_links_fbise(self, start_url: str) -> list:
-    """
-    FBISE class page directly lists links to individual paper pages.
-    Pattern: /class-9-biology-fbise-past-paper-2025/
-    """
-    soup = self._get_soup(start_url)
-    if not soup:
-        logger.error(f"Could not fetch FBISE class page: {start_url}")
-        return []
+    def _extract_links_fbise(self, start_url: str) -> list:
+        """
+        FBISE class page directly links to individual paper pages.
+        Pattern: /class-9-biology-fbise-past-paper-2025/
+        """
+        soup = self._get_soup(start_url)
+        if not soup:
+            logger.error(f"Could not fetch FBISE class page: {start_url}")
+            return []
 
-    file_urls = []
-    paper_page_links = []
+        file_urls = []
+        paper_page_links = []
 
-    # Find all links inside entry-content that look like paper pages
-    content_div = soup.find("div", class_="entry-content")
-    if content_div:
-        for a in content_div.find_all("a", href=True):
-            href = a["href"]
-            # Matches URLs like /class-9-biology-fbise-past-paper-2025/
-            if re.search(r'/class-\d+-[a-z]+-fbise-past-paper-\d{4}', href, re.IGNORECASE):
-                full_url = urljoin(start_url, href)
-                paper_page_links.append(full_url)
-    else:
-        # Fallback: search whole page
+        # Find all links inside entry-content that look like paper pages
+        content_div = soup.find("div", class_="entry-content")
+        if content_div:
+            for a in content_div.find_all("a", href=True):
+                href = a["href"]
+                # Matches URLs like /class-9-biology-fbise-past-paper-2025/
+                if re.search(r'/class-\d+-[a-z]+-fbise-past-paper-\d{4}', href, re.IGNORECASE):
+                    full_url = urljoin(start_url, href)
+                    paper_page_links.append(full_url)
+        else:
+            # Fallback: search whole page
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if re.search(r'/class-\d+-[a-z]+-fbise-past-paper-\d{4}', href, re.IGNORECASE):
+                    full_url = urljoin(start_url, href)
+                    paper_page_links.append(full_url)
+
+        # Also include links from fbisesolvedpastpapers.com (older papers)
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            if re.search(r'/class-\d+-[a-z]+-fbise-past-paper-\d{4}', href, re.IGNORECASE):
+            if "fbisesolvedpastpapers.com" in href and "past-paper" in href:
                 full_url = urljoin(start_url, href)
                 paper_page_links.append(full_url)
 
-    # Also check links from fbisesolvedpastpapers.com domain (older papers)
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if "fbisesolvedpastpapers.com" in href and "past-paper" in href:
-            full_url = urljoin(start_url, href)
-            paper_page_links.append(full_url)
+        # Remove duplicates while preserving order
+        paper_page_links = list(dict.fromkeys(paper_page_links))
+        logger.info(f"Found {len(paper_page_links)} paper page links on {start_url}")
 
-    # Remove duplicates
-    paper_page_links = list(dict.fromkeys(paper_page_links))
-    logger.info(f"Found {len(paper_page_links)} paper page links on {start_url}")
+        # Visit each paper page and extract PDF link
+        for paper_url in paper_page_links:
+            logger.debug(f"Visiting paper page: {paper_url}")
+            paper_soup = self._get_soup(paper_url)
+            if not paper_soup:
+                continue
 
-    # Visit each paper page and extract PDF link
-    for paper_url in paper_page_links:
-        logger.debug(f"Visiting paper page: {paper_url}")
-        paper_soup = self._get_soup(paper_url)
-        if not paper_soup:
-            continue
-
-        # Find PDF link – usually a direct .pdf link or inside a download button
-        pdf_found = False
-        for a in paper_soup.find_all("a", href=True):
-            href = a["href"]
-            if href.lower().endswith(".pdf"):
-                pdf_url = urljoin(paper_url, href)
-                file_urls.append(pdf_url)
-                pdf_found = True
-                break
-        # If no direct PDF, look for a download button that redirects
-        if not pdf_found:
-            download_btn = paper_soup.find("a", string=re.compile(r'download|click here', re.I))
-            if download_btn and download_btn.get("href"):
-                href = download_btn["href"]
+            # Look for direct .pdf link
+            pdf_found = False
+            for a in paper_soup.find_all("a", href=True):
+                href = a["href"]
                 if href.lower().endswith(".pdf"):
                     pdf_url = urljoin(paper_url, href)
                     file_urls.append(pdf_url)
+                    pdf_found = True
+                    break
 
-        time.sleep(random.uniform(0.5, 1.0))
+            # If no direct PDF, look for a download button/link
+            if not pdf_found:
+                download_btn = paper_soup.find("a", string=re.compile(r'download|click here', re.I))
+                if download_btn and download_btn.get("href"):
+                    href = download_btn["href"]
+                    if href.lower().endswith(".pdf"):
+                        pdf_url = urljoin(paper_url, href)
+                        file_urls.append(pdf_url)
 
-    logger.info(f"Total PDF links found from FBISE: {len(file_urls)}")
-    return list(set(file_urls))
+            time.sleep(random.uniform(0.5, 1.0))
+
+        logger.info(f"Total PDF links found from FBISE: {len(file_urls)}")
+        return list(set(file_urls))
 
     def _extract_links_multan(self, start_url: str) -> list:
-        """
-        Parse Multan Board pages with download tables.
-        Improved to also find ZIP files and direct PDFs.
-        """
+        """Parse Multan Board pages for PDF/ZIP links."""
         soup = self._get_soup(start_url)
         if not soup:
             return []
         file_urls = []
 
-        # Find all tables with past papers (class may vary)
         tables = soup.select("table.table-striped, table.past-papers")
         for table in tables:
             for a in table.find_all("a", href=True):
@@ -168,7 +157,7 @@ class Scraper:
                     pdf_url = urljoin(start_url, href)
                     file_urls.append(pdf_url)
 
-        # If no tables found, fallback to all PDF/ZIP links on page
+        # Fallback: any PDF/ZIP on page
         if not file_urls:
             for a in soup.find_all("a", href=True):
                 href = a["href"]
@@ -180,7 +169,7 @@ class Scraper:
 
     def _extract_links_ilmkidunya(self, start_url: str) -> list:
         """
-        Handle ilmkidunya with extra care (cookies, headers).
+        Handle ilmkidunya with extra care.
         Note: This site may block requests; use headless browser if needed.
         """
         soup = self._get_soup(start_url)
@@ -189,7 +178,6 @@ class Scraper:
             return []
         file_urls = []
 
-        # Find all links to detail pages (e.g., /past_papers/9th-class/...)
         detail_links = []
         for a in soup.find_all("a", href=True):
             href = a["href"]
@@ -197,24 +185,51 @@ class Scraper:
             if "past_papers" in full_url and any(x in full_url for x in ["9th", "10th", "11th", "12th"]):
                 detail_links.append(full_url)
 
-        # Visit each detail page and find download link
         for detail_url in detail_links:
             logger.debug(f"Visiting detail page: {detail_url}")
             detail_soup = self._get_soup(detail_url)
             if not detail_soup:
                 continue
-            # Look for download button/link
             for a in detail_soup.find_all("a", href=True):
                 href = a["href"]
                 if href.lower().endswith(".pdf"):
                     pdf_url = urljoin(detail_url, href)
                     file_urls.append(pdf_url)
-                # Sometimes the link text indicates download
                 if "download" in a.get_text().lower() or "click here" in a.get_text().lower():
                     pdf_url = urljoin(detail_url, href)
                     if pdf_url.lower().endswith(".pdf"):
                         file_urls.append(pdf_url)
             time.sleep(random.uniform(0.5, 1.5))
+
+        return list(set(file_urls))
+
+    def _extract_links_generic(self, start_url: str, domain: str) -> list:
+        """BFS crawl for PDF/images up to max_depth."""
+        visited = set()
+        queue = deque()
+        queue.append((start_url, 0))
+        file_urls = []
+
+        while queue:
+            url, depth = queue.popleft()
+            if url in visited:
+                continue
+            visited.add(url)
+
+            soup = self._get_soup(url)
+            if not soup:
+                continue
+
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                full_url = urljoin(url, href)
+
+                if any(full_url.lower().endswith(ext) for ext in [".pdf", ".jpg", ".jpeg", ".png", ".zip"]):
+                    file_urls.append(full_url)
+                elif depth < self.max_depth and self._should_follow_link(full_url, domain):
+                    queue.append((full_url, depth + 1))
+
+            time.sleep(random.uniform(0.5, 1.0))
 
         return list(set(file_urls))
 
@@ -229,34 +244,7 @@ class Scraper:
         elif "ilmkidunya.com" in domain:
             return self._extract_links_ilmkidunya(start_url)
         else:
-            # Generic fallback: BFS crawl up to max_depth
-            visited = set()
-            queue = deque()
-            queue.append((start_url, 0))
-            file_urls = []
-
-            while queue:
-                url, depth = queue.popleft()
-                if url in visited:
-                    continue
-                visited.add(url)
-
-                soup = self._get_soup(url)
-                if not soup:
-                    continue
-
-                for a in soup.find_all("a", href=True):
-                    href = a["href"]
-                    full_url = urljoin(url, href)
-
-                    if any(full_url.lower().endswith(ext) for ext in [".pdf", ".jpg", ".jpeg", ".png", ".zip"]):
-                        file_urls.append(full_url)
-                    elif depth < self.max_depth and self._should_follow_link(full_url, domain):
-                        queue.append((full_url, depth + 1))
-
-                time.sleep(random.uniform(0.5, 1.0))
-
-            return list(set(file_urls))
+            return self._extract_links_generic(start_url, domain)
 
     def _download_file(self, url, dest_path, source_hashes):
         """Download file with retries and source-specific hash verification."""
@@ -266,7 +254,6 @@ class Scraper:
                 resp.raise_for_status()
 
                 content_type = resp.headers.get("content-type", "").lower()
-                # If content is HTML, it might be an error page; skip
                 if "html" in content_type and not url.lower().endswith(('.pdf', '.zip')):
                     logger.warning(f"Skipping non-binary response from {url}")
                     return None
@@ -306,7 +293,7 @@ class Scraper:
         source_raw_dir.mkdir(parents=True, exist_ok=True)
 
         downloaded = 0
-        source_hashes = set()  # Hash set per source to avoid false duplicates
+        source_hashes = set()
 
         for url in file_urls:
             parsed = urlparse(url)
