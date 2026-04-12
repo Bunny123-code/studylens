@@ -2,6 +2,7 @@ import os
 import time
 import hashlib
 import logging
+import re
 from urllib.parse import urljoin, urlparse
 from pathlib import Path
 from collections import deque
@@ -19,10 +20,11 @@ class Scraper:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     ]
 
-    # Keywords that indicate a link should be followed
-    FOLLOW_KEYWORDS = ["past-paper", "past_paper", "paper", "202", "201", "2020", "2021", "2022", "2023", "2024", "2025"]
-    # Keywords to avoid following
-    AVOID_KEYWORDS = ["guess", "note", "book", "syllabus", "date-sheet", "result", "roll-no"]
+    # Keywords to avoid following (prevents recursion into notes, books, etc.)
+    AVOID_KEYWORDS = [
+        "guess", "note", "book", "syllabus", "date-sheet", "result",
+        "roll-no", "practical", "fbise-books", "fbise-notes"
+    ]
 
     def __init__(self, raw_dir="data/raw", delay=1.5, max_retries=3, max_depth=1):
         self.raw_dir = Path(raw_dir)
@@ -30,8 +32,15 @@ class Scraper:
         self.max_retries = max_retries
         self.max_depth = max_depth
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": self.USER_AGENTS[0]})
-        self.downloaded_hashes = set()
+        # Set default headers to mimic a real browser (helps with ilmkidunya)
+        self.session.headers.update({
+            "User-Agent": self.USER_AGENTS[0],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        })
 
     def _get_soup(self, url):
         for attempt in range(self.max_retries):
@@ -59,55 +68,150 @@ class Scraper:
         for avoid in self.AVOID_KEYWORDS:
             if avoid in url_lower:
                 return False
-        # Must contain at least one follow keyword or a year pattern
-        for kw in self.FOLLOW_KEYWORDS:
-            if kw in url_lower:
-                return True
+        # Must contain "past" or "paper" or a year pattern
+        if "past" in url_lower or "paper" in url_lower or re.search(r'20[12]\d', url_lower):
+            return True
         return False
 
-    def _extract_links(self, start_url: str) -> list:
+    def _extract_links_fbise(self, start_url: str) -> list:
         """
-        Crawl using BFS up to max_depth to find all PDF/image links.
-        Returns list of direct file URLs.
+        Crawl FBISE site: subject pages contain PDF links.
+        Example: class-12-biology-fbise-past-papers/
         """
-        start_domain = urlparse(start_url).netloc
-        visited = set()
-        queue = deque()
-        queue.append((start_url, 0))
+        soup = self._get_soup(start_url)
+        if not soup:
+            return []
         file_urls = []
 
-        while queue:
-            url, depth = queue.popleft()
-            if url in visited:
+        # Find all subject links on the main class page
+        subject_links = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            full_url = urljoin(start_url, href)
+            if "/class-" in full_url and "fbise-past-papers" in full_url:
+                subject_links.append(full_url)
+
+        # Visit each subject page and extract PDF links
+        for subj_url in subject_links:
+            logger.debug(f"Visiting subject page: {subj_url}")
+            sub_soup = self._get_soup(subj_url)
+            if not sub_soup:
                 continue
-            visited.add(url)
+            for a in sub_soup.find_all("a", href=True):
+                pdf_url = urljoin(subj_url, a["href"])
+                if pdf_url.lower().endswith(".pdf"):
+                    file_urls.append(pdf_url)
+            time.sleep(0.5)
 
-            logger.debug(f"Crawling depth {depth}: {url}")
-            soup = self._get_soup(url)
-            if not soup:
+        return list(set(file_urls))
+
+    def _extract_links_multan(self, start_url: str) -> list:
+        """
+        Parse Multan Board pages with download tables.
+        The page uses a table with class 'table table-striped'.
+        """
+        soup = self._get_soup(start_url)
+        if not soup:
+            return []
+        file_urls = []
+
+        # Find all tables with past papers
+        tables = soup.select("table.table-striped")
+        for table in tables:
+            rows = table.find_all("tr")
+            for row in rows:
+                # Find download link (usually in last column)
+                links = row.find_all("a", href=True)
+                for link in links:
+                    href = link["href"]
+                    if href.lower().endswith(".pdf"):
+                        pdf_url = urljoin(start_url, href)
+                        file_urls.append(pdf_url)
+
+        return list(set(file_urls))
+
+    def _extract_links_ilmkidunya(self, start_url: str) -> list:
+        """
+        Handle ilmkidunya with extra care (cookies, headers).
+        The site lists papers in a grid; each paper has a detail page.
+        """
+        soup = self._get_soup(start_url)
+        if not soup:
+            logger.error(f"Could not fetch ilmkidunya page: {start_url}")
+            return []
+        file_urls = []
+
+        # Find all links to detail pages (e.g., /past_papers/9th-class/...)
+        detail_links = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            full_url = urljoin(start_url, href)
+            if "past_papers" in full_url and any(x in full_url for x in ["9th", "10th", "11th", "12th"]):
+                detail_links.append(full_url)
+
+        # Visit each detail page and find download link
+        for detail_url in detail_links:
+            logger.debug(f"Visiting detail page: {detail_url}")
+            detail_soup = self._get_soup(detail_url)
+            if not detail_soup:
                 continue
+            # Look for download button/link
+            for a in detail_soup.find_all("a", href=True):
+                href = a["href"]
+                if href.lower().endswith(".pdf"):
+                    pdf_url = urljoin(detail_url, href)
+                    file_urls.append(pdf_url)
+                # Sometimes the link text indicates download
+                if "download" in a.get_text().lower() or "click here" in a.get_text().lower():
+                    pdf_url = urljoin(detail_url, href)
+                    if pdf_url.lower().endswith(".pdf"):
+                        file_urls.append(pdf_url)
+            time.sleep(0.5)
 
-            # Find direct file links
-            for a in soup.find_all("a", href=True):
-                href = a["href"].strip()
-                full_url = urljoin(url, href)
-                full_lower = full_url.lower()
+        return list(set(file_urls))
 
-                # Direct file links
-                if any(full_lower.endswith(ext) for ext in [".pdf", ".jpg", ".jpeg", ".png"]):
-                    if full_url not in file_urls:
+    def _extract_links(self, start_url: str, source_name: str) -> list:
+        """Dispatch to appropriate parser based on domain."""
+        domain = urlparse(start_url).netloc
+
+        if "fbisepastpapers.com" in domain:
+            return self._extract_links_fbise(start_url)
+        elif "bisemultan.edu.pk" in domain:
+            return self._extract_links_multan(start_url)
+        elif "ilmkidunya.com" in domain:
+            return self._extract_links_ilmkidunya(start_url)
+        else:
+            # Generic fallback: find all PDF/image links up to max_depth
+            visited = set()
+            queue = deque()
+            queue.append((start_url, 0))
+            file_urls = []
+
+            while queue:
+                url, depth = queue.popleft()
+                if url in visited:
+                    continue
+                visited.add(url)
+
+                soup = self._get_soup(url)
+                if not soup:
+                    continue
+
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    full_url = urljoin(url, href)
+
+                    if any(full_url.lower().endswith(ext) for ext in [".pdf", ".jpg", ".jpeg", ".png"]):
                         file_urls.append(full_url)
-                # Intermediate pages: follow if within depth limit and criteria met
-                elif depth < self.max_depth and self._should_follow_link(full_url, start_domain):
-                    if full_url not in visited:
+                    elif depth < self.max_depth and self._should_follow_link(full_url, domain):
                         queue.append((full_url, depth + 1))
 
-            time.sleep(0.5)  # small delay between page fetches
+                time.sleep(0.5)
 
-        return file_urls
+            return list(set(file_urls))
 
-    def _download_file(self, url, dest_path):
-        """Download file with retries and hash verification."""
+    def _download_file(self, url, dest_path, source_hashes):
+        """Download file with retries and source-specific hash verification."""
         for attempt in range(self.max_retries):
             try:
                 resp = self.session.get(url, stream=True, timeout=45)
@@ -120,6 +224,7 @@ class Scraper:
 
                 hasher = hashlib.sha256()
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
+
                 with open(dest_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=8192):
                         if chunk:
@@ -127,11 +232,12 @@ class Scraper:
                             hasher.update(chunk)
 
                 file_hash = hasher.hexdigest()
-                if file_hash in self.downloaded_hashes:
-                    logger.info(f"Duplicate file skipped: {url}")
+                if file_hash in source_hashes:
+                    logger.info(f"Duplicate within source skipped: {url}")
                     os.remove(dest_path)
                     return None
-                self.downloaded_hashes.add(file_hash)
+
+                source_hashes.add(file_hash)
                 return dest_path
 
             except Exception as e:
@@ -144,13 +250,15 @@ class Scraper:
     def scrape_source(self, source_name, start_url):
         """Crawl one source website and save all discovered files."""
         logger.info(f"Starting scrape of {source_name} from {start_url}")
-        file_urls = self._extract_links(start_url)
+        file_urls = self._extract_links(start_url, source_name)
         logger.info(f"Found {len(file_urls)} potential files.")
 
         source_raw_dir = self.raw_dir / source_name
         source_raw_dir.mkdir(parents=True, exist_ok=True)
 
         downloaded = 0
+        source_hashes = set()  # Hash set per source to avoid false duplicates
+
         for url in file_urls:
             parsed = urlparse(url)
             filename = os.path.basename(parsed.path)
@@ -162,10 +270,11 @@ class Scraper:
                 logger.debug(f"File already exists: {dest}")
                 continue
 
-            result = self._download_file(url, dest)
+            result = self._download_file(url, dest, source_hashes)
             if result:
                 downloaded += 1
                 logger.info(f"Downloaded: {result.name}")
+
             time.sleep(self.delay)
 
         logger.info(f"Completed {source_name}: {downloaded} new files downloaded.")
