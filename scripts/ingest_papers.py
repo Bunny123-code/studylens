@@ -1,249 +1,225 @@
 #!/usr/bin/env python3
-"""
-scripts/ingest_papers.py
-Professional PDF → TXT converter using ocrmypdf.
-Stores .txt files in the same folder as the original PDF.
-Resumable, memory‑optimized, continuous mode.
 
-Fixes applied:
-- Removed --remove-background (unsupported in current ocrmypdf)
-- Added failure tracking (max 3 attempts per file)
-- Uses pdftotext for digital PDFs to save time
-"""
-
-import sys
 import os
-import argparse
+import sys
 import json
-import subprocess
+import re
+import io
+import argparse
 import time
-import shutil
 from pathlib import Path
-from typing import List, Set, Optional, Dict
+from typing import Set, List, Optional, Tuple
+
+# -----------------------------
+# DEPENDENCIES
+# -----------------------------
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    print("Install PyMuPDF: pip install pymupdf")
+    sys.exit(1)
 
 try:
-    from tqdm import tqdm
-    HAS_TQDM = True
+    import pytesseract
+    from PIL import Image
 except ImportError:
-    HAS_TQDM = False
-    def tqdm(iterable, **kwargs):
-        return iterable
+    print("Install pytesseract + pillow: pip install pytesseract pillow")
+    sys.exit(1)
 
-DATA_ROOTS = [Path("data/past_papers"), Path("data/model_papers")]
-PROGRESS_FILE = Path("backend/data/ingest_progress.json")
-FAILED_LOG = Path("backend/data/failed_files.log")
-FAILURE_COUNT_FILE = Path("backend/data/failure_counts.json")
-
-# Optimized ocrmypdf flags WITHOUT --remove-background
-OCR_FLAGS = [
-    "--tesseract-pagesegmode", "1",
-    "--tesseract-oem", "1",
-    "--oversample", "200",
-    "--skip-text",                # skip if text already present
-    "--output-type", "pdf",
-    "--jobs", "1",
-    "--max-image-mpixels", "500",
+# -----------------------------
+# CONFIG
+# -----------------------------
+DATA_ROOTS = [
+    Path("data/past_papers"),
+    Path("data/model_papers"),
 ]
 
-MAX_FAILURES = 3  # skip file after this many consecutive failures
+PROGRESS_FILE = Path("backend/data/ingest_progress.json")
+FAILURE_FILE = Path("backend/data/failure_counts.json")
 
-def check_dependencies() -> None:
-    if shutil.which("ocrmypdf") is None:
-        print("ERROR: ocrmypdf not found. Install with:")
-        print("  pip install ocrmypdf")
-        print("  sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils")
-        sys.exit(1)
-    if shutil.which("pdftotext") is None:
-        print("WARNING: pdftotext not found. Digital PDFs will be OCR'd instead.")
-        print("  Install with: sudo apt-get install -y poppler-utils")
+FAST_DPI = 200
+ACCURATE_DPI = 300
+MIN_VALID_SIZE = 1000  # bytes
 
-def load_json(path: Path, default=None):
+TESS_FAST = "--psm 4 --oem 1"
+TESS_ACCURATE = "--psm 6 --oem 1"
+
+# -----------------------------
+# JSON HELPERS
+# -----------------------------
+def load_json(path, default):
     if not path.exists():
-        return default if default is not None else {}
+        return default
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
-        return default if default is not None else {}
+        return default
 
-def save_json(path: Path, data):
+def save_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     tmp.replace(path)
 
-def load_progress() -> Set[str]:
-    data = load_json(PROGRESS_FILE, {"completed": []})
-    return set(data.get("completed", []))
+def load_progress():
+    return set(load_json(PROGRESS_FILE, {"completed": []})["completed"])
 
-def save_progress(completed: Set[str]) -> None:
-    save_json(PROGRESS_FILE, {"completed": list(completed)})
+def save_progress(s):
+    save_json(PROGRESS_FILE, {"completed": list(s)})
 
-def load_failure_counts() -> Dict[str, int]:
-    return load_json(FAILURE_COUNT_FILE, {})
+def load_failures():
+    return load_json(FAILURE_FILE, {})
 
-def save_failure_counts(counts: Dict[str, int]) -> None:
-    save_json(FAILURE_COUNT_FILE, counts)
+def save_failures(f):
+    save_json(FAILURE_FILE, f)
 
-def log_failed_file(pdf_path: Path) -> None:
-    with open(FAILED_LOG, "a", encoding="utf-8") as f:
-        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {pdf_path}\n")
-
-def find_all_pdfs(board_filter: Optional[str] = None) -> List[Path]:
+# -----------------------------
+# FILE DISCOVERY
+# -----------------------------
+def find_pdfs():
     pdfs = []
     for root in DATA_ROOTS:
-        if not root.exists():
-            continue
-        for pdf in root.rglob("*.pdf"):
-            if board_filter and board_filter not in pdf.parts:
-                continue
-            pdfs.append(pdf.resolve())
+        if root.exists():
+            pdfs.extend(root.rglob("*.pdf"))
     return sorted(pdfs)
 
-def extract_text_from_digital_pdf(pdf_path: Path) -> bool:
-    """Use pdftotext to extract text from a PDF that already has a text layer."""
-    txt_path = pdf_path.with_suffix(".txt")
+# -----------------------------
+# OCR CORE
+# -----------------------------
+def preprocess(pix):
+    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+    img = img.point(lambda x: 0 if x < 140 else 255, "1")
+    return img
+
+def ocr_page(page, dpi, config):
+    pix = page.get_pixmap(dpi=dpi)
+    img = preprocess(pix)
+    text = pytesseract.image_to_string(img, config=config)
+    return text
+
+def extract_pdf(pdf_path):
+    doc = fitz.open(pdf_path)
+    pages = []
+
+    for i in range(len(doc)):
+        page = doc.load_page(i)
+        text = ocr_page(page, FAST_DPI, TESS_FAST)
+        pages.append(text)
+
+    doc.close()
+    return "\n\n".join(pages)
+
+def extract_pdf_high_quality(pdf_path):
+    doc = fitz.open(pdf_path)
+    pages = []
+
+    for i in range(len(doc)):
+        page = doc.load_page(i)
+        text = ocr_page(page, ACCURATE_DPI, TESS_ACCURATE)
+        pages.append(text)
+
+    doc.close()
+    return "\n\n".join(pages)
+
+# -----------------------------
+# VALIDATION
+# -----------------------------
+def is_valid(txt_path):
+    return txt_path.exists() and txt_path.stat().st_size > MIN_VALID_SIZE
+
+# -----------------------------
+# PROCESS ONE FILE
+# -----------------------------
+def process_pdf(pdf):
+    txt_path = pdf.with_suffix(".txt")
+
+    # Skip if already valid
+    if is_valid(txt_path):
+        return True, "already_done"
+
     try:
-        subprocess.run(
-            ["pdftotext", "-layout", str(pdf_path), str(txt_path)],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-        )
-        return txt_path.exists()
-    except Exception:
-        return False
+        text = extract_pdf(pdf)
 
-def process_pdf(pdf_path: Path) -> bool:
-    """
-    Attempt to extract text.
-    First try pdftotext for digital PDFs (fast).
-    If that fails or produces empty file, fall back to ocrmypdf.
-    """
-    txt_path = pdf_path.with_suffix(".txt")
+        # Retry if weak
+        if len(text.strip()) < 300:
+            text = extract_pdf_high_quality(pdf)
 
-    # 1. Try pdftotext first (if available)
-    if shutil.which("pdftotext"):
-        if extract_text_from_digital_pdf(pdf_path):
-            # Check if file is not empty
-            if txt_path.stat().st_size > 100:  # at least some text
-                return True
-            else:
-                txt_path.unlink(missing_ok=True)  # delete empty, fall back to OCR
+        # Ensure directory exists
+        txt_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 2. Fall back to ocrmypdf
-    try:
-        cmd = [
-            "ocrmypdf",
-            "--sidecar", str(txt_path),
-            *OCR_FLAGS,
-            str(pdf_path),
-            "/dev/null"
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        if result.returncode != 0:
-            tqdm.write(f"  FAILED (ocrmypdf): {pdf_path.name} - {result.stderr.strip()}")
-            return False
-        return txt_path.exists()
+        # Write safely
+        tmp = txt_path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+
+        tmp.replace(txt_path)
+
+        # Verify
+        if not is_valid(txt_path):
+            return False, "invalid_output"
+
+        return True, "success"
+
     except Exception as e:
-        tqdm.write(f"  ERROR: {pdf_path.name} - {e}")
-        return False
+        return False, str(e)
 
-def get_pending_pdfs(force: bool = False, board_filter: Optional[str] = None) -> List[Path]:
-    all_pdfs = find_all_pdfs(board_filter)
-    completed = load_progress()
-    failure_counts = load_failure_counts()
-    pending = []
+# -----------------------------
+# MAIN LOOP
+# -----------------------------
+def run(force=False, sleep=1):
+    pdfs = find_pdfs()
+    progress = load_progress()
+    failures = load_failures()
 
-    for pdf in all_pdfs:
+    total = len(pdfs)
+    done = 0
+
+    print(f"Total PDFs: {total}")
+
+    for pdf in pdfs:
         pdf_str = str(pdf)
-        if force:
-            pending.append(pdf)
-        else:
-            # Skip if already marked complete OR .txt exists
-            if pdf_str in completed or pdf.with_suffix(".txt").exists():
-                if pdf_str not in completed and pdf.with_suffix(".txt").exists():
-                    completed.add(pdf_str)
-                    save_progress(completed)
-                continue
+        txt_path = pdf.with_suffix(".txt")
 
-            # Skip if failed too many times
-            fails = failure_counts.get(pdf_str, 0)
-            if fails >= MAX_FAILURES:
-                continue
+        # Fix corrupted progress
+        if pdf_str in progress and not is_valid(txt_path):
+            print(f"[FIX] Missing txt → reprocessing: {pdf}")
+            progress.remove(pdf_str)
+            save_progress(progress)
 
-            pending.append(pdf)
-    return pending
+        # Skip valid
+        if not force and is_valid(txt_path):
+            if pdf_str not in progress:
+                progress.add(pdf_str)
+                save_progress(progress)
+            done += 1
+            continue
 
-def ingest_continuous(force: bool = False, board: Optional[str] = None, sleep_between: int = 10):
-    print("Continuous mode. Press Ctrl+C to stop.\n")
-    all_pdfs = find_all_pdfs(board)
-    total = len(all_pdfs)
-    print(f"Total PDFs matching filter: {total}")
+        print(f"[{done+1}/{total}] Processing: {pdf}")
 
-    completed = load_progress()
-    failure_counts = load_failure_counts()
-    print(f"Already completed: {len(completed)}")
-    print(f"Files with failures: {len(failure_counts)}")
+        success, msg = process_pdf(pdf)
 
-    while True:
-        pending = get_pending_pdfs(force=force, board_filter=board)
-        if not pending:
-            print("All PDFs processed or max failures reached. Exiting.")
-            break
-
-        pdf = pending[0]
-        pdf_str = str(pdf)
-        rel_path = pdf.relative_to(Path.cwd())
-        print(f"[{time.strftime('%H:%M:%S')}] Processing: {rel_path}")
-
-        success = process_pdf(pdf)
         if success:
-            completed.add(pdf_str)
-            save_progress(completed)
-            # Clear failure count for this file
-            if pdf_str in failure_counts:
-                del failure_counts[pdf_str]
-                save_failure_counts(failure_counts)
-            print(f"  Success. ({len(completed)}/{total} completed)")
+            progress.add(pdf_str)
+            save_progress(progress)
+            print("   ✓ Done")
         else:
-            # Increment failure count
-            failure_counts[pdf_str] = failure_counts.get(pdf_str, 0) + 1
-            save_failure_counts(failure_counts)
-            fails = failure_counts[pdf_str]
-            print(f"  Failed ({fails}/{MAX_FAILURES}).")
-            if fails >= MAX_FAILURES:
-                log_failed_file(pdf)
-                print(f"  Maximum failures reached. Skipping this file permanently.")
+            failures[pdf_str] = failures.get(pdf_str, 0) + 1
+            save_failures(failures)
+            print(f"   ✗ Failed: {msg}")
 
-        time.sleep(sleep_between)
+        done += 1
+        time.sleep(sleep)
 
-def main():
-    parser = argparse.ArgumentParser(description="StudyLens PDF Ingestion")
-    parser.add_argument("--max-files", type=int, help="Process N files then stop")
-    parser.add_argument("--continuous", action="store_true", help="Run until all done")
-    parser.add_argument("--force", action="store_true", help="Re‑extract all (ignore progress)")
-    parser.add_argument("--board", type=str, help="Only process PDFs under this board folder (e.g., FBISE)")
-    parser.add_argument("--sleep", type=int, default=5, help="Seconds between files in continuous mode")
+    print("Completed.")
+
+# -----------------------------
+# ENTRY
+# -----------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    check_dependencies()
-
-    if args.continuous:
-        ingest_continuous(force=args.force, board=args.board, sleep_between=args.sleep)
-    else:
-        # For batch mode, you may want to add similar failure handling.
-        # For now, keep simple.
-        from tqdm import tqdm as tqdm_module
-        pending = get_pending_pdfs(force=args.force, board_filter=args.board)
-        if args.max_files:
-            pending = pending[:args.max_files]
-        print(f"Processing {len(pending)} PDFs.")
-        completed = load_progress()
-        for pdf in tqdm_module(pending):
-            if process_pdf(pdf):
-                completed.add(str(pdf))
-                save_progress(completed)
-            time.sleep(1)
-
-if __name__ == "__main__":
-    main()
+    run(force=args.force)
