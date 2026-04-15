@@ -19,3 +19,6 @@ google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
 google-api-python-client==2.146.0
 flask-talisman==1.1.0
+PyMuPDF==1.24.11
+ocrmypdf==16.8.0
+bcrypt==4.2.0
